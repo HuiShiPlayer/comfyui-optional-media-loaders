@@ -1,0 +1,3 @@
+# comfyui-optional-media-loaders
+# ComfyUI本体自带 torch/numpy/pillow/opencv-python，不要重复安装
+soundfile>=0.12.1
