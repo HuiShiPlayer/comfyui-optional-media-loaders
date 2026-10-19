@@ -2,11 +2,12 @@
 // 为 Image / Audio / Video 三个可选加载节点补充：
 //   1) 点击「choose ... to upload」按钮，弹出文件选择框加载本地媒体到 input 目录
 //   2) 拖拽文件到节点直接上传
-//   3) 选中资源后的可视化预览（图片 / 音频播放器 / 视频预览）
+//   3) 选中节点时展示预览（图片 / 音频播放器 / 视频预览），取消选中自动收起，
+//      避免预览把节点撑大后遮挡邻近节点导致无法选中
 //
 // 【多节点兼容】对齐 ComfyUI 官方 LoadImage 的做法：每个媒体类型只创建一个
 //   全局共享的隐藏 fileInput，点击哪个节点的按钮就把"当前上传目标"指向该节点，
-//   从而避免多个同类节点各自建 fileInput 导致的互相干扰（一个加载完另一个不能用）。
+//   避免多个同类节点各自建 fileInput 造成的互相干扰。
 import { app } from '../../../scripts/app.js'
 import { api } from '../../../scripts/api.js'
 
@@ -145,56 +146,77 @@ function addUploadWidget(nodeType, widgetName, type = "video") {
     });
 }
 
-// 图片预览：下拉选中的 input 目录图片用 <img> 展示，选 "None" 时隐藏
+// ===================== 预览公共逻辑 =====================
+// 预览只在"节点被选中 且 已选择文件"时显示；取消选中或未选文件时收起，
+// 这样节点默认保持小尺寸，多个节点贴在一起也能逐个选中。
+function setupPreviewWidget(node, widgetName, element, mediaEl, computeHeight) {
+    element.style.pointerEvents = "none"; // 预览不拦截鼠标，避免挡到邻近节点
+    element.style.display = "none";       // 默认收起
+
+    const previewWidget = node.addDOMWidget("preview", "preview", element, {
+        serialize: false,
+    });
+    previewWidget.computeSize = function (width) {
+        if (element.style.display === "none") {
+            return [width, 0];   // 收起状态不占用节点高度，避免遮挡邻近节点
+        }
+        const h = computeHeight(width);
+        return [width, h];
+    };
+
+    const widget = node.widgets?.find((w) => w.name === widgetName);
+
+    function refresh() {
+        const hasFile = !!widget?.value && widget.value !== "None";
+        const show = hasFile && node.selected;   // 有文件且节点被选中
+        if (show) {
+            const val = widget.value;
+            mediaEl.src = api.apiURL("/view?type=input&filename=" + encodeURIComponent(val));
+            element.style.display = "";
+            if (typeof mediaEl.play === "function") { mediaEl.play().catch(() => {}); }
+        } else {
+            if (typeof mediaEl.pause === "function") { mediaEl.pause(); }
+            mediaEl.removeAttribute('src');
+            if (typeof mediaEl.load === "function") { mediaEl.load(); }
+            element.style.display = "none";
+        }
+        node.setSize(node.computeSize());
+    }
+
+    mediaEl.onload = refresh;
+    mediaEl.onerror = refresh;
+    chainCallback(widget, "callback", refresh);
+    chainCallback(node, "onSelected", refresh);
+    chainCallback(node, "onDeselected", refresh);
+    setTimeout(refresh, 100);
+}
+
+// 图片预览：选中节点时用 <img> 展示，取消选中自动收起
 function addImagePreview(nodeType, widgetName = "image") {
     if (nodeType.prototype.__optMediaImagePreviewAdded) return;
     nodeType.prototype.__optMediaImagePreviewAdded = true;
 
     chainCallback(nodeType.prototype, "onNodeCreated", function () {
-        const previewNode = this;
         const element = document.createElement("div");
         element.style.width = "100%";
         const imgEl = document.createElement("img");
-        imgEl.style.width = "100%";
+        imgEl.style.maxWidth = "100%";
+        imgEl.style.maxHeight = "160px";   // 缩略图：等比缩放，避免撑高节点遮挡邻近节点
+        imgEl.style.objectFit = "contain";
+        imgEl.style.margin = "0 auto";
         imgEl.style.display = "block";
         element.appendChild(imgEl);
 
-        let previewWidget = this.addDOMWidget("imagepreview", "preview", element, {
-            serialize: false,
-        });
-        previewWidget.computeSize = function (width) {
-            if (imgEl.naturalWidth && imgEl.naturalHeight) {
-                return [width, Math.min(width * imgEl.naturalHeight / imgEl.naturalWidth, 512)];
-            }
-            return [width, 0];
-        };
-
-        function updatePreview() {
-            const val = previewNode.widgets.find((w) => w.name === widgetName)?.value;
-            if (!val || val === "None") {
-                imgEl.removeAttribute('src');
-                element.style.display = "none";
-            } else {
-                element.style.display = "";
-                imgEl.src = api.apiURL("/view?type=input&filename=" + encodeURIComponent(val));
-            }
-            previewNode.setSize(previewNode.computeSize());
-        }
-        imgEl.onload = updatePreview;
-        imgEl.onerror = updatePreview;
-        chainCallback(previewNode.widgets.find((w) => w.name === widgetName), "callback", updatePreview);
-        // 节点创建后延迟初始化预览
-        setTimeout(updatePreview, 100);
+        setupPreviewWidget(this, widgetName, element, imgEl, () => 160);
     });
 }
 
-// 音频预览：下拉选中的 input 目录音频用原生 <audio> 播放器展示
+// 音频预览：选中节点时显示 <audio> 播放器，取消选中自动收起
 function addAudioPreview(nodeType, widgetName = "audio") {
     if (nodeType.prototype.__optMediaAudioPreviewAdded) return;
     nodeType.prototype.__optMediaAudioPreviewAdded = true;
 
     chainCallback(nodeType.prototype, "onNodeCreated", function () {
-        const previewNode = this;
         const element = document.createElement("div");
         element.style.width = "100%";
         const audioEl = document.createElement("audio");
@@ -202,77 +224,33 @@ function addAudioPreview(nodeType, widgetName = "audio") {
         audioEl.preload = "metadata";
         audioEl.style.width = "100%";
         audioEl.style.display = "block";
+        audioEl.style.pointerEvents = "auto"; // 仅播放控件本身可交互
         element.appendChild(audioEl);
 
-        let previewWidget = this.addDOMWidget("audiopreview", "preview", element, {
-            serialize: false,
-        });
-        previewWidget.computeSize = function (width) {
-            return [width, 36];
-        };
-
-        function updatePreview() {
-            const val = previewNode.widgets.find((w) => w.name === widgetName)?.value;
-            if (!val || val === "None") {
-                audioEl.pause();
-                audioEl.removeAttribute('src');
-                audioEl.load();
-                element.style.display = "none";
-            } else {
-                element.style.display = "";
-                audioEl.src = api.apiURL("/view?type=input&filename=" + encodeURIComponent(val));
-            }
-            previewNode.setSize(previewNode.computeSize());
-        }
-        chainCallback(previewNode.widgets.find((w) => w.name === widgetName), "callback", updatePreview);
-        // 节点创建后延迟初始化预览
-        setTimeout(updatePreview, 100);
+        setupPreviewWidget(this, widgetName, element, audioEl, () => 36);
     });
 }
 
-// 轻量视频预览：用浏览器原生 video 播放 input 目录下选中的视频（不依赖 VHS 后端）
-// 下拉选 "None" 时自动隐藏预览
+// 视频预览：选中节点时用原生 <video> 预览，取消选中自动收起
 function addVideoPreview(nodeType, widgetName = "video") {
     if (nodeType.prototype.__optMediaVideoPreviewAdded) return;
     nodeType.prototype.__optMediaVideoPreviewAdded = true;
 
     chainCallback(nodeType.prototype, "onNodeCreated", function () {
-        const previewNode = this;
         const element = document.createElement("div");
         element.style.width = "100%";
         const videoEl = document.createElement("video");
         videoEl.controls = false;
         videoEl.loop = true;
         videoEl.muted = true;
-        videoEl.style.width = "100%";
+        videoEl.style.maxWidth = "100%";
+        videoEl.style.maxHeight = "160px";   // 缩略预览：等比缩放，避免撑高节点遮挡邻近节点
+        videoEl.style.objectFit = "contain";
+        videoEl.style.margin = "0 auto";
         videoEl.style.display = "block";
         element.appendChild(videoEl);
 
-        let previewWidget = this.addDOMWidget("videopreview", "preview", element, {
-            serialize: false,
-        });
-        previewWidget.computeSize = function (width) {
-            const h = videoEl.videoHeight ? width / (videoEl.videoWidth / videoEl.videoHeight) : 0;
-            return [width, h];
-        };
-
-        function updatePreview() {
-            const video = previewNode.widgets.find((w) => w.name === widgetName)?.value;
-            if (!video || video === "None") {
-                videoEl.pause();
-                videoEl.removeAttribute('src');
-                videoEl.load();
-                element.style.display = "none";
-            } else {
-                element.style.display = "";
-                videoEl.src = api.apiURL("/view?type=input&filename=" + encodeURIComponent(video));
-                videoEl.play();
-            }
-            previewNode.setSize(previewNode.computeSize());
-        }
-        chainCallback(previewNode.widgets.find((w) => w.name === widgetName), "callback", updatePreview);
-        // 节点创建后延迟初始化预览
-        setTimeout(updatePreview, 100);
+        setupPreviewWidget(this, widgetName, element, videoEl, () => 160);
     });
 }
 
