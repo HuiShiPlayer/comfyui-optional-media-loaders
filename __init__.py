@@ -16,7 +16,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "OptionalLoadVideo": "Optional Load Video (None支持)",
 }
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 __author__ = "Custom"
 
 WEB_DIRECTORY = "./web"
